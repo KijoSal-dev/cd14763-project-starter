@@ -1,0 +1,13 @@
+# Project Reflection: Customer Support AI Agent
+
+## Design decision
+
+In the memory hook, I saved the customer's original message to long-term memory rather than the version with retrieved memories prepended. The hook adds a "Customer Context" block to each user message so the model can personalise its answer. If that augmented text were saved, every turn would store earlier memories again, filling the memory with duplicates. I also wrote `get_namespaces` to read `namespaceTemplates` and fall back to `namespaces`, so the hook works with either response format. Testing confirmed it: after I introduced myself as Jane in one session, the extracted memories included my name and my preference for concise replies, and the agent could recall them in a new session.
+
+## Challenge
+
+The hardest part was deployment. I first deployed from Windows, where `agentcore deploy` failed because a Windows-only dependency, `pywin32`, could not be resolved for the Linux ARM64 runtime. The lab account also blocked several IAM actions, so the toolkit's automatic role creation was initially denied. I moved the deployment to AWS CloudShell, which builds on Linux, and the toolkit then created the execution role. A later issue was the order tool returning "Unrecognised route". The Lambda log showed an empty event, which led me to check the proxy integration, redeploy the API to the `prod` stage and update the gateway target. After that, the tool returned the correct tracking details. Test 6, the browser tool, still failed. The runtime logs show Playwright's driver cannot load `libatomic.so.1` in the managed runtime, on both Python 3.12 and 3.13. I could not install system libraries in a direct-code deployment, so I documented the failure with logs and reported it to my mentor.
+
+## Production extensions
+
+I would replace the Gateway's NONE authorizer with JWT or IAM authentication, and scope IAM policies to the specific Knowledge Base, memory and tools. I would add observability, alarms and structured logging, plus automated tests for each workflow. The refund tool needs guardrails, such as amount limits and human approval for large refunds, and the agent should verify customer identity before showing order details. For browsing, I would use a container-based deployment, where system libraries can be installed, or call the AgentCore browser directly. Finally, I would keep configuration and secrets outside the source code.
