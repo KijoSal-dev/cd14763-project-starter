@@ -172,10 +172,28 @@ class MemoryHook(HookProvider):
         self._original_query = None  # user text before memory context is prepended
 
     @staticmethod
-    def _is_plain_text(message: dict) -> bool:
-        """True if the message's first block is plain text (not a tool result/use)."""
-        content = message.get("content") or []
-        return bool(content) and "text" in content[0]
+    def _extract_text(message: dict) -> str:
+        """Join all non-empty text blocks in a message (ignores reasoning/tool blocks)."""
+        blocks = message.get("content") or []
+        parts = [
+            b["text"].strip()
+            for b in blocks
+            if isinstance(b, dict) and isinstance(b.get("text"), str) and b["text"].strip()
+        ]
+        return "\n".join(parts)
+
+    @staticmethod
+    def _has_tool_block(message: dict) -> bool:
+        """True if the message carries a tool call or a tool result."""
+        return any(
+            isinstance(b, dict) and ("toolUse" in b or "toolResult" in b)
+            for b in (message.get("content") or [])
+        )
+
+    @classmethod
+    def _is_plain_text(cls, message: dict) -> bool:
+        """True if the message has usable text and no tool call/result blocks."""
+        return bool(cls._extract_text(message)) and not cls._has_tool_block(message)
 
     def retrieve_customer_context(self, event: MessageAddedEvent):
         """Retrieve relevant memories and prepend them to the user message."""
@@ -186,7 +204,7 @@ class MemoryHook(HookProvider):
         if last.get("role") != "user" or not self._is_plain_text(last):
             return
 
-        user_query = last["content"][0]["text"]
+        user_query = self._extract_text(last)
         self._original_query = user_query
 
         all_context = []
@@ -212,9 +230,9 @@ class MemoryHook(HookProvider):
 
         if all_context:
             context_text = "\n".join(all_context)
-            last["content"][0]["text"] = (
-                f"Customer Context:\n{context_text}\n\n{user_query}"
-            )
+            last["content"] = [
+                {"text": f"Customer Context:\n{context_text}\n\n{user_query}"}
+            ]
 
     def save_support_interaction(self, event: AfterInvocationEvent):
         """Save the completed turn to memory after the agent responds."""
@@ -224,14 +242,17 @@ class MemoryHook(HookProvider):
 
         customer_query = None
         agent_response = None
+
         for msg in reversed(messages):
-            if msg.get("role") == "assistant" and agent_response is None:
-                if self._is_plain_text(msg):
-                    agent_response = msg["content"][0]["text"]
-            elif msg.get("role") == "user" and customer_query is None:
-                if self._is_plain_text(msg):
-                    customer_query = msg["content"][0]["text"]
-                    break
+            if not self._is_plain_text(msg):
+                continue  # skip tool calls, tool results, empty/reasoning-only messages
+
+            role = msg.get("role")
+            if role == "assistant" and agent_response is None:
+                agent_response = self._extract_text(msg)
+            elif role == "user" and agent_response is not None:
+                customer_query = self._extract_text(msg)
+                break  # found the query that belongs to this response
 
         # Save the user's original words, not the version with memory context prepended.
         if self._original_query:
@@ -380,14 +401,14 @@ print(json.dumps({{
     "tier": tier,
     "product_category": product_category,
     "original_total": order_total,
-    "points_redeemed": points_redeemed,
+    "points_redeemed": int(points_redeemed),
     "points_value_usd": round(points_value, 2),
-    "tier_discount_percent": tier_rate * 100,
+    "tier_discount_pct": round(tier_rate * 100, 2),
     "tier_discount_usd": tier_discount,
     "final_total": final_total,
     "total_savings": total_savings,
-    "points_earned": points_earned,
-    "remaining_points": remaining_points,
+    "points_earned": int(points_earned),
+    "remaining_points": int(remaining_points)
 }}))
 """
 
@@ -405,18 +426,30 @@ print(json.dumps({{
     except Exception as e:
         # TODO: Implement fallback calculation using tier discount only
         logger.warning("Code Interpreter unavailable, using fallback: %s", e)
-        tier_rates = {"Silver": 0.00, "Gold": 0.10, "Platinum": 0.15}
+        tier_rates = {
+            "Silver": 0.00,
+            "Gold": 0.10,
+            "Platinum": 0.15
+        }
+
         rate = tier_rates.get(tier.strip().title(), 0.0)
         discount = round(order_total * rate, 2)
+        final_total = round(order_total - discount, 2)
+        
         return json.dumps({
             "note": "Fallback calculation (tier discount only; points not applied).",
-            "tier": tier,
-            "original_total": order_total,
-            "tier_discount_percent": rate * 100,
+            "tier": tier.strip().title(),
+            "product_category": product_category.strip().lower(),
+            "original_total": float(order_total),
+            "points_redeemed": 0,
+            "points_value_usd": 0.0,
+            "tier_discount_pct": round(rate * 100, 2),
             "tier_discount_usd": discount,
-            "final_total": round(order_total - discount, 2),
+            "final_total": final_total,
+            "total_savings": discount,
+            "points_earned": 0,
+            "remaining_points": int(loyalty_points)
         })
-
 
 # ── TODO 8 — Agent Entrypoint ─────────────────────────────────────────────────
 # Implement the invoke() function decorated with @app.entrypoint.
